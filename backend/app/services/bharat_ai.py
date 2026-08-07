@@ -285,7 +285,8 @@ class BharatAIService:
                     return translated
             except Exception:
                 pass
-        if self.bedrock is not None and self.model:
+        settings = get_settings()
+        if settings.ai_provider == "gemini" or (self.bedrock is not None and self.model):
             fallback = self._converse_json(
                 system_prompt=(
                     "You are a precise translation engine for Indian languages. "
@@ -341,6 +342,18 @@ class BharatAIService:
         payload: dict[str, Any],
         max_tokens: int = 1200,
     ) -> dict[str, Any]:
+        settings = get_settings()
+        if settings.ai_provider == "gemini" or self.bedrock is None:
+            try:
+                from app.services.gemini_client import gemini_extract_json
+                prompt = json.dumps(payload, default=str)
+                return gemini_extract_json(
+                    prompt=prompt,
+                    system_instruction=system_prompt,
+                )
+            except Exception:
+                return {}
+
         if self.bedrock is None or not self.model:
             return {}
         try:

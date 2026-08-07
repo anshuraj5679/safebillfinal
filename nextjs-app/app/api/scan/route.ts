@@ -334,7 +334,7 @@ export async function POST(request: NextRequest) {
       : DEFAULT_OCR_MODE
     const normalizedManualPurchaseDate = purchaseDate ? toIsoDate(purchaseDate) : ''
     const normalizedManualTotalAmount = totalAmount ? normalizeAmount(totalAmount) : ''
-    const shouldUseAsyncPipeline = ASYNC_SCAN_ENABLED && isImage && !LOCAL_MODES.has(effectiveOcrMode)
+    const shouldUseAsyncPipeline = ASYNC_SCAN_ENABLED && isImage && !LOCAL_MODES.has(effectiveOcrMode) && !ocrText
     let resolvedDocumentId = ''
     let asyncJobStatus: AsyncExtractionJobStatusResponse | null = null
 

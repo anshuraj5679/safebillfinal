@@ -2,47 +2,16 @@
 
 import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Check, Copy, KeyRound, Mail, ShieldCheck, Smartphone, UserPlus } from 'lucide-react'
+import { Check, Copy, Mail, ShieldCheck, Smartphone, UserPlus } from 'lucide-react'
 
-import { persistClientAuthCookies } from '@/lib/auth-client'
-import { normalizeAuthContact, type CognitoAuthResult } from '@/lib/cognito'
+import { persistClientAuthCookies, signUpWithIdentifier } from '@/lib/auth-client'
 import { useGsapReveal } from '@/lib/gsap-helpers'
 import { useAuthStore } from '@/lib/store/auth-store'
 import type { UserType } from '@/lib/types'
 
 
-interface SignupApiResponse {
-  userSub?: string
-  userConfirmed?: boolean
-  nextStep?: 'SIGNED_UP' | 'CONFIRM_SIGNUP'
-  customId?: string
-  username?: string
-  email?: string
-  phone?: string
-  deliveryDestination?: string
-  deliveryMedium?: string
-  error?: string
-}
-
-interface CreatedAccountState {
-  customId: string
-  username: string
-  name: string
-  password: string
-  userType: UserType
-  email?: string
-  phone?: string
-  deliveryDestination?: string
-  deliveryMedium?: string
-  confirmed: boolean
-}
-
 function accountLabel(userType: UserType): string {
   return userType === 'merchant' ? 'Merchant ID' : 'Consumer ID'
-}
-
-function contactSummary(account: CreatedAccountState): string {
-  return account.email || account.phone || account.username
 }
 
 export function SignupScreen() {
@@ -54,55 +23,14 @@ export function SignupScreen() {
   const [name, setName] = useState('')
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
-  const [verificationCode, setVerificationCode] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
-  const [createdAccount, setCreatedAccount] = useState<CreatedAccountState | null>(null)
+  const [createdCustomId, setCreatedCustomId] = useState<string | null>(null)
+  const [signupSuccess, setSignupSuccess] = useState(false)
+  const [needsVerification, setNeedsVerification] = useState(false)
 
-  useGsapReveal(rootRef, [userType, createdAccount?.customId, createdAccount?.confirmed, copied, error, loading])
-
-  const finalizeLogin = async (account: CreatedAccountState) => {
-    const loginResponse = await fetch('/api/auth/cognito/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: account.username,
-        password: account.password,
-        userType: account.userType,
-        customId: account.customId,
-        name: account.name,
-        email: account.email,
-        phone: account.phone,
-      }),
-    })
-    const loginPayload = (await loginResponse.json().catch(() => null)) as (CognitoAuthResult & { error?: string }) | null
-
-    const sessionToken = String(loginPayload?.idToken || loginPayload?.accessToken || '').trim()
-
-    if (!loginResponse.ok || !sessionToken || !loginPayload?.user?.userId) {
-      throw new Error(loginPayload?.error || 'Login failed after signup.')
-    }
-
-    const resolvedUserType = loginPayload.user.userType === 'merchant' ? 'merchant' : account.userType
-    await setAuth(
-      {
-        userId: loginPayload.user.userId,
-        email: loginPayload.user.email || account.email,
-        phone: loginPayload.user.phone || account.phone,
-        loginId: loginPayload.user.loginId || account.username,
-        name: loginPayload.user.name || account.name,
-        userType: resolvedUserType,
-        customId: loginPayload.user.customId || account.customId,
-        picture: loginPayload.user.picture,
-        provider: loginPayload.user.provider,
-      },
-      sessionToken
-    )
-
-    persistClientAuthCookies(sessionToken, resolvedUserType)
-    setCreatedAccount({ ...account, confirmed: true, userType: resolvedUserType })
-  }
+  useGsapReveal(rootRef, [userType, createdCustomId, signupSuccess, copied, error, loading])
 
   const handleSignup = async () => {
     if (!name.trim() || !identifier.trim() || !password.trim()) {
@@ -114,43 +42,24 @@ export function SignupScreen() {
     setError(null)
 
     try {
-      normalizeAuthContact(identifier)
-
-      const signupResponse = await fetch('/api/auth/cognito/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          identifier: identifier.trim(),
-          password,
-          name: name.trim(),
-          userType,
-        }),
-      })
-      const signupPayload = (await signupResponse.json().catch(() => null)) as SignupApiResponse | null
-
-      if (!signupResponse.ok || !signupPayload?.customId || !signupPayload.username) {
-        throw new Error(signupPayload?.error || 'Signup failed.')
-      }
-
-      const account: CreatedAccountState = {
-        customId: signupPayload.customId,
-        username: signupPayload.username,
-        name: name.trim(),
+      const result = await signUpWithIdentifier({
+        identifier: identifier.trim(),
         password,
+        name: name.trim(),
         userType,
-        email: signupPayload.email,
-        phone: signupPayload.phone,
-        deliveryDestination: signupPayload.deliveryDestination,
-        deliveryMedium: signupPayload.deliveryMedium,
-        confirmed: Boolean(signupPayload.userConfirmed),
-      }
+      })
 
-      if (signupPayload.userConfirmed) {
-        await finalizeLogin(account)
+      setCreatedCustomId(result.customId)
+
+      if (result.needsVerification) {
+        setNeedsVerification(true)
         return
       }
 
-      setCreatedAccount(account)
+      // Auto-login successful
+      await setAuth(result.user, result.token)
+      persistClientAuthCookies(result.token, result.userType)
+      setSignupSuccess(true)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Signup failed.')
     } finally {
@@ -158,46 +67,15 @@ export function SignupScreen() {
     }
   }
 
-  const handleConfirmSignup = async () => {
-    if (!createdAccount) return
-    if (!verificationCode.trim()) {
-      setError('Enter the verification code sent by Cognito.')
-      return
-    }
-
-    setLoading(true)
-    setError(null)
-
-    try {
-      const response = await fetch('/api/auth/cognito/confirm-signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: createdAccount.username,
-          code: verificationCode.trim(),
-        }),
-      })
-      const payload = (await response.json().catch(() => null)) as { error?: string } | null
-      if (!response.ok) {
-        throw new Error(payload?.error || 'Verification failed.')
-      }
-
-      await finalizeLogin(createdAccount)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Verification failed.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const copyId = () => {
-    if (!createdAccount?.customId) return
-    navigator.clipboard.writeText(createdAccount.customId)
+    if (!createdCustomId) return
+    navigator.clipboard.writeText(createdCustomId)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
 
-  if (createdAccount?.confirmed) {
+  // Success screen
+  if (signupSuccess && createdCustomId) {
     return (
       <div ref={rootRef} className="min-h-screen bg-base-200 flex items-center justify-center p-4">
         <div data-gsap="card" className="card bg-base-100 shadow-2xl w-full max-w-md border border-base-300">
@@ -208,27 +86,27 @@ export function SignupScreen() {
             <div data-gsap="hero">
               <h2 className="text-2xl font-bold">Account Ready</h2>
               <p className="text-sm text-base-content/60 mt-2">
-                Your AWS-authenticated account is active. Save your {accountLabel(createdAccount.userType)} for future sign-in.
+                Your account is active. Save your {accountLabel(userType)} for future sign-in.
               </p>
             </div>
 
             <div className="w-full">
               <div data-gsap="card" className="flex items-center justify-center gap-3 p-4 bg-base-200 rounded-xl">
-                <kbd className="kbd kbd-lg font-mono tracking-wider">{createdAccount.customId}</kbd>
+                <kbd className="kbd kbd-lg font-mono tracking-wider">{createdCustomId}</kbd>
                 <button onClick={copyId} data-gsap-hover="lift" className="btn btn-ghost btn-sm btn-circle">
                   {copied ? <Check className="w-4 h-4 text-success" /> : <Copy className="w-4 h-4" />}
                 </button>
               </div>
-              <p className="mt-3 text-xs text-base-content/60">{contactSummary(createdAccount)}</p>
+              <p className="mt-3 text-xs text-base-content/60">{identifier}</p>
               {copied ? <p className="text-success text-xs mt-2 font-medium">Copied to clipboard.</p> : null}
             </div>
 
             <button
-              onClick={() => router.push(createdAccount.userType === 'merchant' ? '/merchant-dashboard' : '/locker')}
+              onClick={() => router.push(userType === 'merchant' ? '/merchant-dashboard' : '/locker')}
               data-gsap-hover="lift"
               className="btn btn-primary w-full"
             >
-              Continue to {createdAccount.userType === 'merchant' ? 'Dashboard' : 'SafeBill'}
+              Continue to {userType === 'merchant' ? 'Dashboard' : 'SafeBill'}
             </button>
           </div>
         </div>
@@ -236,62 +114,43 @@ export function SignupScreen() {
     )
   }
 
-  if (createdAccount && !createdAccount.confirmed) {
+  // Verification required screen
+  if (needsVerification && createdCustomId) {
     return (
       <div ref={rootRef} className="min-h-screen bg-base-200 flex items-center justify-center p-4">
         <div data-gsap="card" className="card bg-base-100 shadow-2xl w-full max-w-md border border-base-300">
           <div className="card-body gap-6">
             <div className="text-center">
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mb-4">
-                <KeyRound className="w-8 h-8 text-primary" />
+                <Mail className="w-8 h-8 text-primary" />
               </div>
-              <h2 className="text-2xl font-bold">Verify Your Account</h2>
+              <h2 className="text-2xl font-bold">Check Your Email</h2>
               <p className="text-sm text-base-content/60 mt-2">
-                Enter the verification code sent to {createdAccount.deliveryDestination || contactSummary(createdAccount)}.
+                We&apos;ve sent a confirmation link to <strong>{identifier}</strong>. Click it to activate your account.
               </p>
             </div>
 
-            {error ? (
-              <div className="alert alert-error text-sm">
-                <span>{error}</span>
-              </div>
-            ) : null}
-
             <div className="rounded-2xl bg-base-200 p-4 text-center">
-              <p className="text-xs uppercase tracking-[0.2em] text-base-content/50">{accountLabel(createdAccount.userType)}</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-base-content/50">{accountLabel(userType)}</p>
               <div className="mt-2 flex items-center justify-center gap-3">
-                <kbd className="kbd kbd-lg font-mono tracking-wider">{createdAccount.customId}</kbd>
+                <kbd className="kbd kbd-lg font-mono tracking-wider">{createdCustomId}</kbd>
                 <button onClick={copyId} className="btn btn-ghost btn-sm btn-circle">
                   {copied ? <Check className="w-4 h-4 text-success" /> : <Copy className="w-4 h-4" />}
                 </button>
               </div>
+              {copied ? <p className="text-success text-xs mt-2 font-medium">Copied to clipboard.</p> : null}
             </div>
 
-            <div className="space-y-4">
-              <div className="form-control">
-                <label className="label">
-                  <span className="label-text font-medium">Verification Code</span>
-                </label>
-                <input
-                  type="text"
-                  placeholder="Enter OTP / code"
-                  value={verificationCode}
-                  onChange={(event) => setVerificationCode(event.target.value)}
-                  onKeyDown={(event) => event.key === 'Enter' && handleConfirmSignup()}
-                  className="input input-bordered w-full"
-                />
-              </div>
-
-              <button onClick={handleConfirmSignup} disabled={loading} className="btn btn-primary w-full">
-                {loading ? <span className="loading loading-spinner loading-sm"></span> : 'Verify and Continue'}
-              </button>
-            </div>
+            <button onClick={() => router.push('/login')} className="btn btn-primary w-full">
+              Go to Login
+            </button>
           </div>
         </div>
       </div>
     )
   }
 
+  // Signup form
   const identifierLooksLikeEmail = identifier.includes('@')
 
   return (
@@ -314,7 +173,7 @@ export function SignupScreen() {
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mb-4">
                 <UserPlus className="w-8 h-8 text-primary" />
               </div>
-              <h1 className="text-2xl font-bold">Create AWS Account</h1>
+              <h1 className="text-2xl font-bold">Create Account</h1>
               <p className="text-sm text-base-content/60 mt-1">Register with email or phone and get a unique SafeBill ID</p>
             </div>
 
@@ -374,7 +233,7 @@ export function SignupScreen() {
                   />
                 </label>
                 <p className="mt-2 text-xs text-base-content/50">
-                  We will create a unique {accountLabel(userType)} tied to this Cognito account.
+                  We will create a unique {accountLabel(userType)} tied to this account.
                 </p>
               </div>
 
@@ -399,7 +258,7 @@ export function SignupScreen() {
 
             <p className="text-center text-sm text-base-content/60">
               Already have an account?{' '}
-              <button onClick={() => router.push('/landing')} className="link link-primary font-semibold">
+              <button onClick={() => router.push('/login')} className="link link-primary font-semibold">
                 Sign in
               </button>
             </p>

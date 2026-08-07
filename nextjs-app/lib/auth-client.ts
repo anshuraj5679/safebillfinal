@@ -1,131 +1,212 @@
-import {
-  normalizeAuthContact,
-  parseSafeBillId,
-  type CognitoAuthResult,
-} from '@/lib/cognito'
+import { getSupabaseBrowserClient } from '@/lib/supabase'
 import type { User, UserType } from '@/lib/types'
 
-export interface LookupIdentityResponse {
-  userId?: string
-  username?: string
-  email?: string
-  phone?: string
-  fullName?: string
-  userType?: UserType
-  customId?: string
-  error?: string
-}
-
-export interface SignInWithCustomIdResult {
+export interface SignInResult {
   token: string
   user: User
   userType: UserType
 }
 
-async function authenticateWithResolvedIdentity(params: {
-  username: string
-  password: string
-  userType: UserType
-  customId?: string
-  fullName?: string
-  email?: string
-  phone?: string
-}): Promise<SignInWithCustomIdResult> {
-  const authResponse = await fetch('/api/auth/cognito/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      username: params.username,
-      password: params.password,
-      userType: params.userType,
-      customId: params.customId,
-      name: params.fullName || '',
-      email: params.email,
-      phone: params.phone,
-    }),
-  })
-  const authData = (await authResponse.json().catch(() => null)) as (CognitoAuthResult & { error?: string }) | null
-
-  if (!authResponse.ok || !authData?.accessToken || !authData.user?.userId) {
-    throw new Error(authData?.error || 'Login failed.')
-  }
-
-  const finalUserType = authData.user.userType === 'merchant' ? 'merchant' : params.userType
-  const sessionToken = String(authData.idToken || authData.accessToken || '').trim()
-  if (!sessionToken) {
-    throw new Error('Login succeeded but no session token was returned.')
-  }
-
-  return {
-    token: sessionToken,
-    userType: finalUserType,
-    user: {
-      userId: authData.user.userId,
-      email: authData.user.email || params.email,
-      phone: authData.user.phone || params.phone,
-      loginId: authData.user.loginId || params.username,
-      userType: finalUserType,
-      customId: authData.user.customId || params.customId,
-      name: authData.user.name || params.fullName || '',
-      picture: authData.user.picture,
-      provider: authData.user.provider,
-    },
-  }
-}
-
-export async function signInWithCustomId(params: {
-  customId: string
-  password: string
-  userType: UserType
-}): Promise<SignInWithCustomIdResult> {
-  const normalizedCustomId = params.customId.trim().toUpperCase()
-  const lookupResponse = await fetch('/api/auth/lookup-id', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customId: normalizedCustomId, userType: params.userType }),
-  })
-  const lookupData = (await lookupResponse.json().catch(() => null)) as LookupIdentityResponse | null
-
-  if (!lookupResponse.ok || !lookupData?.username) {
-    throw new Error(lookupData?.error || `No account found for this ${params.userType} ID.`)
-  }
-
-  const resolvedType = lookupData.userType === 'merchant' ? 'merchant' : 'consumer'
-  return authenticateWithResolvedIdentity({
-    username: lookupData.username,
-    password: params.password,
-    userType: resolvedType,
-    customId: lookupData.customId || normalizedCustomId,
-    fullName: lookupData.fullName || '',
-    email: lookupData.email,
-    phone: lookupData.phone,
-  })
-}
-
+/**
+ * Sign in with email/phone + password via Supabase Auth.
+ */
 export async function signInWithIdentifier(params: {
   identifier: string
   password: string
   userType: UserType
-}): Promise<SignInWithCustomIdResult> {
-  const safeBillId = parseSafeBillId(params.identifier)
-  if (safeBillId) {
-    return signInWithCustomId({
-      customId: safeBillId.customId,
-      password: params.password,
-      userType: safeBillId.userType,
+}): Promise<SignInResult> {
+  const supabase = getSupabaseBrowserClient()
+
+  const isEmail = params.identifier.includes('@')
+
+  const { data, error } = isEmail
+    ? await supabase.auth.signInWithPassword({
+        email: params.identifier.trim(),
+        password: params.password,
+      })
+    : await supabase.auth.signInWithPassword({
+        phone: params.identifier.trim(),
+        password: params.password,
+      })
+
+  if (error || !data.session || !data.user) {
+    throw new Error(error?.message || 'Login failed. Please try again.')
+  }
+
+  // Fetch user profile to get customId and user type
+  const { data: profile } = await supabase
+    .from('user_profiles')
+    .select('custom_id, user_type, full_name')
+    .eq('user_id', data.user.id)
+    .single()
+
+  const userType = (profile?.user_type as UserType) || params.userType
+  const customId = profile?.custom_id || undefined
+
+  const user: User = {
+    userId: data.user.id,
+    email: data.user.email,
+    phone: data.user.phone || undefined,
+    name: profile?.full_name || data.user.user_metadata?.full_name || data.user.email?.split('@')[0] || 'User',
+    userType,
+    customId,
+    provider: data.user.app_metadata?.provider || 'email',
+  }
+
+  return {
+    token: data.session.access_token,
+    user,
+    userType,
+  }
+}
+
+/**
+ * Sign up with email/phone + password via Supabase Auth.
+ * Creates user_profiles row with custom SafeBill ID.
+ */
+export async function signUpWithIdentifier(params: {
+  identifier: string
+  password: string
+  name: string
+  userType: UserType
+}): Promise<{
+  user: User
+  token: string
+  userType: UserType
+  customId: string
+  needsVerification: boolean
+}> {
+  const supabase = getSupabaseBrowserClient()
+  const isEmail = params.identifier.includes('@')
+
+  // Generate custom SafeBill ID
+  const prefix = params.userType === 'merchant' ? 'MER' : 'CON'
+  const randomHex = Array.from(crypto.getRandomValues(new Uint8Array(4)))
+    .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+    .join('')
+  const customId = `${prefix}-${randomHex}`
+
+  const signUpPayload = isEmail
+    ? {
+        email: params.identifier.trim(),
+        password: params.password,
+        options: {
+          data: {
+            full_name: params.name.trim(),
+            user_type: params.userType,
+            custom_id: customId,
+          },
+        },
+      }
+    : {
+        phone: params.identifier.trim(),
+        password: params.password,
+        options: {
+          data: {
+            full_name: params.name.trim(),
+            user_type: params.userType,
+            custom_id: customId,
+          },
+        },
+      }
+
+  const { data, error } = await supabase.auth.signUp(signUpPayload)
+
+  if (error || !data.user) {
+    throw new Error(error?.message || 'Signup failed.')
+  }
+
+  const needsVerification = !data.session
+
+  // If we have a session (email confirmation disabled), create profile
+  if (data.session) {
+    await supabase.from('user_profiles').upsert({
+      user_id: data.user.id,
+      custom_id: customId,
+      email: data.user.email || params.identifier.trim(),
+      full_name: params.name.trim(),
+      user_type: params.userType,
     })
   }
 
-  const contact = normalizeAuthContact(params.identifier)
-  return authenticateWithResolvedIdentity({
-    username: contact.value,
-    password: params.password,
+  const user: User = {
+    userId: data.user.id,
+    email: data.user.email,
+    phone: data.user.phone || undefined,
+    name: params.name.trim(),
     userType: params.userType,
-    email: contact.email,
-    phone: contact.phone,
-  })
+    customId,
+    provider: 'email',
+  }
+
+  return {
+    user,
+    token: data.session?.access_token || '',
+    userType: params.userType,
+    customId,
+    needsVerification,
+  }
 }
 
+/**
+ * Sign in with Google OAuth via Supabase Auth.
+ */
+export async function signInWithGoogle(userType: UserType) {
+  const supabase = getSupabaseBrowserClient()
+
+  const redirectUrl = `${window.location.origin}/auth/callback?userType=${userType}`
+
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: redirectUrl,
+      queryParams: {
+        access_type: 'offline',
+        prompt: 'consent',
+      },
+    },
+  })
+
+  if (error) {
+    throw new Error(error.message || 'Google sign-in failed.')
+  }
+}
+
+/**
+ * Request password reset email.
+ */
+export async function forgotPassword(email: string): Promise<void> {
+  const supabase = getSupabaseBrowserClient()
+  const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+    redirectTo: `${window.location.origin}/auth/reset-password`,
+  })
+  if (error) {
+    throw new Error(error.message || 'Failed to send reset email.')
+  }
+}
+
+/**
+ * Reset password with a new password (called from the reset link).
+ */
+export async function resetPassword(newPassword: string): Promise<void> {
+  const supabase = getSupabaseBrowserClient()
+  const { error } = await supabase.auth.updateUser({ password: newPassword })
+  if (error) {
+    throw new Error(error.message || 'Failed to reset password.')
+  }
+}
+
+/**
+ * Sign out the current user.
+ */
+export async function signOut(): Promise<void> {
+  const supabase = getSupabaseBrowserClient()
+  await supabase.auth.signOut()
+}
+
+/**
+ * Persist user type cookie for middleware route protection.
+ */
 export function persistClientAuthCookies(token: string, userType: UserType) {
   if (token) {
     document.cookie = `sb_access_token=${token}; path=/; max-age=${60 * 60 * 24 * 7}`

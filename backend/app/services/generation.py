@@ -1,31 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import Any
 
-try:
-    import boto3
-except Exception:  # pragma: no cover - optional runtime dependency
-    boto3 = None  # type: ignore[assignment]
-
 from app.core.config import get_settings
-from app.services.bedrock_client import configure_bedrock_api_key
 from app.services.planner import Plan
 from app.services.retrieval import RetrievalHit
+
+logger = logging.getLogger(__name__)
 
 
 class GroundedAnswerGenerator:
     def __init__(self) -> None:
         settings = get_settings()
         self.aws_only_mode = settings.aws_only_mode
-        self.model = settings.bedrock_chat_model
-        self.bedrock = None
-        if boto3:
-            try:
-                configure_bedrock_api_key(settings)
-                self.bedrock = boto3.client("bedrock-runtime", region_name=settings.aws_region)
-            except Exception:
-                self.bedrock = None
 
     @staticmethod
     def _context_block(hits: list[RetrievalHit]) -> str:
@@ -78,56 +68,99 @@ class GroundedAnswerGenerator:
                 "numeric_claims": [],
             }
 
-        if not self.bedrock:
-            if self.aws_only_mode:
-                raise RuntimeError("AWS-only mode: Bedrock runtime client is unavailable.")
-            return self._fallback_answer(query, hits, calculations, policy)
-
-        prompt = (
-            "You are a financial auditor assistant. Use ONLY provided chunks and computed data. "
-            "Never invent facts. Return JSON with keys: "
-            "`answer` (string), `claims` (list of {text, citations}), "
-            "`citation_chunk_ids` (list of chunk ids), "
-            "`numeric_claims` (list of {metric, value}). "
-            "Each claim must cite one or more chunk IDs from context."
-        )
-        user_data = {
-            "query": query,
-            "plan": {"complexity": plan.complexity, "steps": [step.__dict__ for step in plan.steps]},
-            "calculations": calculations,
-            "policy_findings": policy,
-            "context": self._context_block(hits),
-        }
-
+        # Try OpenRouter-based generation first
         try:
-            response = self.bedrock.converse(
-                modelId=self.model,
-                system=[{"text": prompt}],
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [{"text": json.dumps(user_data, default=str)}],
-                    }
-                ],
-                inferenceConfig={"temperature": 0.0, "maxTokens": 1200},
-            )
-            content_blocks = (
-                response.get("output", {})
-                .get("message", {})
-                .get("content", [])
-            )
-            response_text = "".join(
-                str(block.get("text", ""))
-                for block in content_blocks
-                if isinstance(block, dict)
-            ).strip()
-            payload = json.loads(response_text or "{}")
-            payload.setdefault("answer", "")
-            payload.setdefault("claims", [])
-            payload.setdefault("citation_chunk_ids", [])
-            payload.setdefault("numeric_claims", [])
-            return payload
-        except Exception:
-            if self.aws_only_mode:
-                raise
+            return self._generate_with_openrouter(query, plan, hits, calculations, policy)
+        except Exception as exc:
+            logger.warning("OpenRouter generation failed (%s), using fallback.", exc)
             return self._fallback_answer(query, hits, calculations, policy)
+
+    def _generate_with_openrouter(
+        self,
+        query: str,
+        plan: Plan,
+        hits: list[RetrievalHit],
+        calculations: dict[str, Any],
+        policy: dict[str, Any],
+    ) -> dict[str, Any]:
+        from app.services.gemini_client import gemini_generate
+
+        system_instruction = (
+            "You are SafeBill AI — an expert warranty and invoice assistant. "
+            "Your job is to answer questions about invoices, warranties, purchases, and bills "
+            "using ONLY the provided document context. "
+            "Rules:\n"
+            "1. Answer in a clear, professional, and helpful tone.\n"
+            "2. Use the actual data from the document chunks provided below.\n"
+            "3. If the user asks about warranty status, calculate days remaining from today.\n"
+            "4. If the user asks about amounts, taxes (GST/CGST/SGST), totals — cite exact numbers.\n"
+            "5. If the user asks a general question (like 'summarize'), give a concise overview.\n"
+            "6. Never invent facts not present in the context.\n"
+            "7. If information is missing, say so clearly.\n"
+            "8. Format your answer nicely with bullet points where appropriate.\n\n"
+            "Return your response as JSON with these keys:\n"
+            '- "answer": string (your full helpful answer)\n'
+            '- "claims": list of {"text": string, "citations": [chunk_id strings]}\n'
+            '- "citation_chunk_ids": list of chunk_id strings you referenced\n'
+            '- "numeric_claims": list of {"metric": string, "value": number or null}\n'
+        )
+
+        context_text = self._context_block(hits)
+
+        user_message = (
+            f"USER QUESTION: {query}\n\n"
+            f"PLAN: complexity={plan.complexity}, steps={[step.name for step in plan.steps]}\n\n"
+            f"CALCULATIONS: {json.dumps(calculations, default=str)}\n\n"
+            f"POLICY FINDINGS: {json.dumps(policy, default=str)}\n\n"
+            f"DOCUMENT CONTEXT:\n{context_text}"
+        )
+
+        raw_response = gemini_generate(
+            user_message,
+            system_instruction=system_instruction,
+            temperature=0.15,
+            max_tokens=1500,
+            response_json=True,
+        )
+
+        if not raw_response:
+            return self._fallback_answer(query, hits, calculations, policy)
+
+        # Parse JSON response
+        try:
+            payload = json.loads(raw_response)
+        except json.JSONDecodeError:
+            # Try extracting JSON from markdown code block
+            json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", raw_response, re.DOTALL)
+            if json_match:
+                try:
+                    payload = json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    payload = None
+            else:
+                # Try finding raw JSON object
+                brace_start = raw_response.find("{")
+                brace_end = raw_response.rfind("}")
+                if brace_start >= 0 and brace_end > brace_start:
+                    try:
+                        payload = json.loads(raw_response[brace_start : brace_end + 1])
+                    except json.JSONDecodeError:
+                        payload = None
+                else:
+                    payload = None
+
+        if not payload or not isinstance(payload, dict):
+            # If JSON parsing completely fails, use raw text as the answer
+            return {
+                "answer": raw_response,
+                "claims": [],
+                "citation_chunk_ids": [str(hit.chunk_id) for hit in hits[:8]],
+                "numeric_claims": [],
+            }
+
+        payload.setdefault("answer", "")
+        payload.setdefault("claims", [])
+        payload.setdefault("citation_chunk_ids", [str(hit.chunk_id) for hit in hits[:8]])
+        payload.setdefault("numeric_claims", [])
+        return payload
+

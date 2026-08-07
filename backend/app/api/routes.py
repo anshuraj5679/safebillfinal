@@ -55,6 +55,7 @@ from app.models import (
 )
 from app.parsers.pdf_parser import extract_invoice_metadata, parse_pdf_document
 from app.services.bedrock_client import configure_bedrock_api_key
+from app.services.gemini_client import gemini_extract_image_metadata, gemini_classify_image
 from app.schemas import (
     AskRequest,
     AskResponse,
@@ -1217,6 +1218,15 @@ def _ocr_image_bytes(image_bytes: bytes) -> str:
     if textract_text:
         return textract_text
 
+    # Gemini Vision fallback: extract raw text from image when other cloud OCR is unavailable.
+    try:
+        from app.services.gemini_client import gemini_ocr_image
+        gemini_text = gemini_ocr_image(image_bytes, "ocr_image.png")
+        if gemini_text:
+            return gemini_text
+    except Exception:
+        pass
+
     if Image is None or pytesseract is None:
         return ""
 
@@ -1317,6 +1327,24 @@ def _build_image_ocr_diagnostics(image_bytes: bytes) -> str:
             diagnostics.append("bedrock=ok")
         except Exception as exc:
             diagnostics.append(f"bedrock=error ({_summarize_exception_message(exc)})")
+
+    # Gemini Vision diagnostic
+    settings_gemini = get_settings()
+    gemini_key = (settings_gemini.gemini_api_key or "").strip()
+    if gemini_key:
+        try:
+            from app.services.gemini_client import get_last_gemini_error
+            last_err = get_last_gemini_error()
+            if "429" in last_err or "quota" in last_err.lower():
+                diagnostics.append(f"gemini_vision=error (Quota Exceeded / HTTP 429 - get free key at https://aistudio.google.com/apikey)")
+            elif last_err:
+                diagnostics.append(f"gemini_vision=error ({last_err[:120]})")
+            else:
+                diagnostics.append(f"gemini_vision=ready (model={settings_gemini.gemini_model})")
+        except Exception:
+            diagnostics.append(f"gemini_vision=ready (model={settings_gemini.gemini_model})")
+    else:
+        diagnostics.append("gemini_vision=unconfigured (set GEMINI_API_KEY in .env)")
 
     return "; ".join(diagnostics)
 
@@ -1536,13 +1564,38 @@ def _classify_document_with_bedrock(ocr_text: str, filename: str) -> dict[str, o
     settings = get_settings()
     if not ocr_text:
         return {}
-    if boto3 is None:
-        return {}
     if os.getenv("PYTEST_CURRENT_TEST"):
         return {}
 
     model = (settings.bedrock_chat_model or "").strip()
-    if not model:
+    if boto3 is None or not model:
+        # Fallback to Gemini for text-based classification.
+        try:
+            from app.services.gemini_client import gemini_extract_json
+            prompt = (
+                f"Classify this document text. Is it a bill/invoice/receipt or warranty card?\n"
+                f"filename={filename}\nocr_text:\n{ocr_text[:8000]}\n\n"
+                f"Return JSON with keys: is_invoice (boolean), document_type (string: invoice/receipt/warranty_card/guarantee_card/other), "
+                f"confidence (0-1), reason (short string)."
+            )
+            parsed = gemini_extract_json(prompt)
+            if isinstance(parsed, dict):
+                raw_is = parsed.get("is_invoice")
+                is_inv = None
+                if isinstance(raw_is, bool):
+                    is_inv = raw_is
+                elif isinstance(raw_is, str):
+                    low = raw_is.strip().lower()
+                    is_inv = True if low in {"true", "1", "yes"} else (False if low in {"false", "0", "no"} else None)
+                conf = _coerce_float(parsed.get("confidence"), default=0.0) or 0.0
+                return {
+                    "is_invoice": is_inv,
+                    "document_type": str(parsed.get("document_type") or "").strip() or None,
+                    "confidence": max(0.0, min(conf, 1.0)),
+                    "reason": str(parsed.get("reason") or "").strip() or None,
+                }
+        except Exception:
+            pass
         return {}
 
     system_prompt = (
@@ -1997,13 +2050,18 @@ def _extract_image_metadata_with_bedrock(image_bytes: bytes, filename: str) -> d
     settings = get_settings()
     if not image_bytes:
         return {}
-    if boto3 is None:
-        return {}
     if os.getenv("PYTEST_CURRENT_TEST"):
         return {}
 
     model = (settings.bedrock_chat_model or "").strip()
-    if not model:
+    if boto3 is None or not model:
+        # Fallback to Gemini Vision for image metadata extraction.
+        try:
+            gemini_result = gemini_extract_image_metadata(image_bytes, filename)
+            if gemini_result and isinstance(gemini_result, dict):
+                return _normalize_invoice_metadata(gemini_result)
+        except Exception:
+            pass
         return {}
     mime_type = mimetypes.guess_type(filename)[0] or "image/png"
     image_format = "png"
@@ -2074,13 +2132,31 @@ def _classify_document_image_with_bedrock(image_bytes: bytes, filename: str) -> 
     settings = get_settings()
     if not image_bytes:
         return {}
-    if boto3 is None:
-        return {}
     if os.getenv("PYTEST_CURRENT_TEST"):
         return {}
 
     model = (settings.bedrock_chat_model or "").strip()
-    if not model:
+    if boto3 is None or not model:
+        # Fallback to Gemini Vision for image classification.
+        try:
+            gemini_result = gemini_classify_image(image_bytes, filename)
+            if gemini_result and isinstance(gemini_result, dict):
+                raw_is = gemini_result.get("is_invoice")
+                is_inv = None
+                if isinstance(raw_is, bool):
+                    is_inv = raw_is
+                elif isinstance(raw_is, str):
+                    low = raw_is.strip().lower()
+                    is_inv = True if low in {"true", "1", "yes"} else (False if low in {"false", "0", "no"} else None)
+                conf = _coerce_float(gemini_result.get("confidence"), default=0.0) or 0.0
+                return {
+                    "is_invoice": is_inv,
+                    "document_type": str(gemini_result.get("document_type") or "").strip() or None,
+                    "confidence": max(0.0, min(conf, 1.0)),
+                    "reason": str(gemini_result.get("reason") or "").strip() or None,
+                }
+        except Exception:
+            pass
         return {}
 
     mime_type = mimetypes.guess_type(filename)[0] or "image/png"
@@ -2674,7 +2750,54 @@ def _run_image_extraction_router(
                 }
             )
 
+    # --- Gemini Vision engine (primary when Gemini API key is configured) ---
     if not local_only_mode:
+        try:
+            gemini_raw = gemini_extract_image_metadata(image_bytes, filename)
+            if gemini_raw and isinstance(gemini_raw, dict):
+                gemini_full_text = str(gemini_raw.pop("full_text", "") or "").strip()
+                gemini_metadata = ensure_strict_extraction(_normalize_invoice_metadata(gemini_raw))
+                if any(
+                    _is_meaningful_metadata_value(gemini_metadata.get(key))
+                    for key in ("bill_id", "vendor", "total_amount", "date")
+                ):
+                    canonical_gemini_text = gemini_full_text or _metadata_to_canonical_text(gemini_metadata)
+                    engine_results.append(
+                        {
+                            "engine": "gemini_vision",
+                            "metadata": gemini_metadata,
+                            "text": canonical_gemini_text,
+                            "field_confidences": compute_field_confidences(
+                                metadata=gemini_metadata,
+                                engine="gemini_vision",
+                                text_quality=estimate_text_quality(canonical_gemini_text),
+                            ),
+                        }
+                    )
+                elif gemini_full_text:
+                    # Even if structured fields were weak, feed full text through regex extraction.
+                    fallback_metadata = ensure_strict_extraction(extract_invoice_metadata(gemini_full_text, filename))
+                    if any(
+                        _is_meaningful_metadata_value(fallback_metadata.get(key))
+                        for key in ("bill_id", "vendor", "total_amount", "date")
+                    ):
+                        engine_results.append(
+                            {
+                                "engine": "gemini_vision",
+                                "metadata": fallback_metadata,
+                                "text": gemini_full_text,
+                                "field_confidences": compute_field_confidences(
+                                    metadata=fallback_metadata,
+                                    engine="gemini_vision",
+                                    text_quality=estimate_text_quality(gemini_full_text),
+                                ),
+                            }
+                        )
+        except Exception:
+            pass  # Gemini unavailable, continue with other engines.
+
+    has_gemini_success = any(r.get("engine") == "gemini_vision" for r in engine_results)
+    if not local_only_mode and not has_gemini_success:
         google_metadata, google_text = _extract_image_metadata_with_google_vision(image_bytes, filename)
         google_vendor = str(google_metadata.get("vendor") or "").strip().lower()
         google_has_invoice_signals = (
@@ -2817,6 +2940,7 @@ def _run_image_extraction_router(
     )
     grounded_engine_names = {
         "google_vision",
+        "gemini_vision",
         "aws_bedrock_text",
         "aws_textract",
         "aws_textract_proxy",
@@ -4047,6 +4171,7 @@ def _ics_timestamp(dt: datetime) -> str:
 
 def _build_warranty_ics(*, uid: str, title: str, description: str, start_at: datetime, end_at: datetime) -> str:
     stamp = _ics_timestamp(datetime.now(timezone.utc))
+    formatted_desc = description.replace(chr(10), "\\n")
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -4057,7 +4182,7 @@ def _build_warranty_ics(*, uid: str, title: str, description: str, start_at: dat
         f"DTSTART:{_ics_timestamp(start_at)}",
         f"DTEND:{_ics_timestamp(end_at)}",
         f"SUMMARY:{title}",
-        f"DESCRIPTION:{description.replace(chr(10), '\\n')}",
+        f"DESCRIPTION:{formatted_desc}",
         "STATUS:CONFIRMED",
         "END:VEVENT",
         "END:VCALENDAR",
@@ -5049,21 +5174,22 @@ async def ingest_image(
             ),
         )
 
-    if _metadata_looks_like_ui(strict_metadata):
-        raise HTTPException(
-            status_code=422,
-            detail="Not a bill/invoice. Please upload a valid invoice or warranty card.",
-        )
-
     has_invoice_signals = any(
         _is_meaningful_metadata_value(strict_metadata.get(key))
         for key in ("bill_id", "vendor", "total_amount", "date")
     )
     has_strong_invoice_engine = any(
-        name in {"google_vision", "aws_bedrock_text", "aws_bedrock_vision", "aws_textract", "aws_textract_proxy", "manual_override"}
+        name in {"google_vision", "gemini_vision", "aws_bedrock_text", "aws_bedrock_vision", "aws_textract", "aws_textract_proxy", "manual_override"}
         for name in engines_used
     )
-    if _looks_like_safebill_ui(resolved_ocr_text) or _looks_like_ui_screenshot(resolved_ocr_text):
+
+    if not (has_strong_invoice_engine and has_invoice_signals) and _metadata_looks_like_ui(strict_metadata):
+        raise HTTPException(
+            status_code=422,
+            detail="Not a bill/invoice. Please upload a valid invoice or warranty card.",
+        )
+
+    if not (has_strong_invoice_engine and has_invoice_signals) and (_looks_like_safebill_ui(resolved_ocr_text) or _looks_like_ui_screenshot(resolved_ocr_text)):
         raise HTTPException(
             status_code=422,
             detail="Not a bill/invoice. Please upload a valid invoice or warranty card.",
@@ -5080,7 +5206,7 @@ async def ingest_image(
             detail="Not a bill/invoice. Please upload a valid invoice or warranty card.",
         )
     if doc_is_invoice is None or doc_is_invoice is False:
-        if not is_allowed_doc_type:
+        if not is_allowed_doc_type and not (has_strong_invoice_engine and has_invoice_signals):
             heuristic_is_invoice, heuristic_confidence = _heuristic_is_invoice_document(resolved_ocr_text)
             if not heuristic_is_invoice and heuristic_confidence >= 0.8:
                 raise HTTPException(

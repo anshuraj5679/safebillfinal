@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import io
@@ -582,7 +582,8 @@ def _extract_line_items_from_text(lines: list[str]) -> list[dict[str, Any]]:
                 and not any(token in previous_lowered for token in ("invoice", "bill", "date", "gst", "tax", "order"))
                 and len(re.findall(r"[A-Za-z]{2,}", previous_line)) >= 2
             ):
-                candidate_source = f"{re.sub(r'^\d+\s+', '', previous_line).strip()} {line}"
+                prev_clean = re.sub(r"^\d+\s+", "", previous_line).strip()
+                candidate_source = f"{prev_clean} {line}"
         candidate = re.sub(r"^\d+\s+", "", candidate_source)
         candidate = trailing_value_re.sub("", candidate).strip(":- ")
         candidate = str(sanitize_merchandise_name(candidate) or candidate).strip(":- ")
@@ -1258,12 +1259,24 @@ def _ocr_page_text(
     settings = get_settings()
     try:
         image = page.to_image(resolution=250).original
+        with io.BytesIO() as buffer:
+            image.save(buffer, format="PNG")
+            image_bytes = buffer.getvalue()
+
         if allow_google:
-            with io.BytesIO() as buffer:
-                image.save(buffer, format="PNG")
-                google_text = _extract_text_with_google_vision(buffer.getvalue()).strip()
+            google_text = _extract_text_with_google_vision(image_bytes).strip()
             if google_text:
                 return google_text
+
+        # Try Gemini OCR as primary cloud fallback
+        try:
+            from app.services.gemini_client import gemini_ocr_image
+            gemini_text = gemini_ocr_image(image_bytes, "ocr_page.png").strip()
+            if gemini_text:
+                return gemini_text
+        except Exception:
+            pass
+
         if allow_local_fallback and pytesseract is not None:
             if settings.tesseract_cmd:
                 pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd

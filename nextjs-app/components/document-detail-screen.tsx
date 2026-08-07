@@ -791,14 +791,14 @@ export function DocumentDetailScreen({ docId }: { docId: string }) {
         { key: 'chat.show', text: 'Ask AI About This Warranty' },
         { key: 'chat.hide', text: 'Hide AI Chat' },
         { key: 'chat.title', text: 'Warranty Assistant' },
-        { key: 'chat.subtitle', text: 'Grounded on your document and powered by Amazon Bedrock' },
+        { key: 'chat.subtitle', text: 'Grounded on your document and powered by SafeBill AI' },
         { key: 'chat.quick', text: 'Quick Questions' },
         { key: 'chat.placeholder', text: 'Ask about this warranty...' },
         { key: 'chat.grounding', text: 'Grounding' },
         { key: 'chat.supportPoints', text: 'Grounded Points' },
         { key: 'chat.missing', text: 'Still Not Visible On Invoice' },
         { key: 'chat.note', text: 'AI note' },
-        { key: 'chat.greeting', text: `Hi! I can answer questions about your ${currentItem?.productName || 'warranty'}.` },
+        { key: 'chat.greeting', text: `Hi! I can answer questions about your ${(currentItem?.productName || 'warranty').split('|')[0].replace(/[\*\s\:\-\[\]]+$/, '').trim()}.` },
         { key: 'chat.reference', text: 'reference' },
         { key: 'deadline.saved', text: 'Saved' },
         { key: 'deadline.left', text: 'left' },
@@ -1860,7 +1860,7 @@ export function DocumentDetailScreen({ docId }: { docId: string }) {
                 setMessages([{
                   id: '1',
                   role: 'assistant',
-                  content: translateUi('chat.greeting', `Hi! I can answer questions about your ${item?.productName || 'warranty'}.`),
+                  content: translateUi('chat.greeting', `Hi! I can answer questions about your ${(item?.productName || 'warranty').split('|')[0].replace(/[\*\s\:\-\[\]]+$/, '').trim()}.`),
                 }])
               }
             }}
@@ -1880,7 +1880,7 @@ export function DocumentDetailScreen({ docId }: { docId: string }) {
                 </div>
                 <div>
                   <h3 className="font-bold text-sm">{translateUi('chat.title', 'Warranty Assistant')}</h3>
-                  <p className="text-xs opacity-70">{translateUi('chat.subtitle', 'Grounded on your document and powered by Amazon Bedrock')}</p>
+                  <p className="text-xs opacity-70">{translateUi('chat.subtitle', 'Grounded on your document and powered by SafeBill AI')}</p>
                 </div>
               </div>
 

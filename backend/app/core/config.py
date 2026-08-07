@@ -86,9 +86,9 @@ except Exception:  # pragma: no cover - fallback when optional dependency is mis
 class Settings(BaseSettings):
     app_name: str = "SafeBill RAG API"
     environment: str = "dev"
-    aws_only_mode: bool = True
-    auth_provider: str = "cognito"
-    ai_provider: str = "bedrock"
+    aws_only_mode: bool = False
+    auth_provider: str = "supabase"
+    ai_provider: str = "gemini"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/safebill"
     aws_region: str = "ap-south-1"
     aws_access_key_id: str = ""
@@ -101,6 +101,17 @@ class Settings(BaseSettings):
     aws_ssm_with_decryption: bool = True
     cors_allowed_origins: str = "http://localhost:3000"
     cors_allow_credentials: bool = False
+    # --- Supabase ---
+    supabase_url: str = ""
+    supabase_anon_key: str = ""
+    supabase_service_role_key: str = ""
+    supabase_jwt_secret: str = ""
+    supabase_jwt_issuer: str = ""
+    supabase_storage_bucket: str = "documents"
+    # --- Gemini AI ---
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.0-flash"
+    # --- OCR ---
     ocr_enabled: bool = True
     use_unstructured_partition: bool = False
     tesseract_cmd: str = ""
@@ -155,7 +166,7 @@ class Settings(BaseSettings):
     bedrock_image_model: str = "amazon.titan-image-generator-v2:0"
     aws_anthropic_key: str = ""
     aws_amazonnova_key: str = ""
-    product_image_generation_enabled: bool = True
+    product_image_generation_enabled: bool = False
     product_image_width: int = 768
     product_image_height: int = 768
     async_extraction_enabled: bool = False
@@ -179,14 +190,14 @@ class Settings(BaseSettings):
         }
     )
     prompt_injection_blocking: bool = True
-    storage_provider: str = "s3"
+    storage_provider: str = "supabase"
     s3_bucket_name: str = ""
     s3_key_prefix: str = "documents"
     s3_presign_ttl_seconds: int = 900
     s3_force_path_style: bool = False
     s3_require_upload_success: bool = False
     dynamodb_mirror_enabled: bool = False
-    dynamodb_read_fallback_enabled: bool = True
+    dynamodb_read_fallback_enabled: bool = False
     dynamodb_documents_table_name: str = ""
     dynamodb_extraction_jobs_table_name: str = ""
     dynamodb_user_created_at_index_name: str = "user_id-created_at-index"

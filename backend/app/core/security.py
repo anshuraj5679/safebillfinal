@@ -50,6 +50,21 @@ def cognito_jwt_runtime_available() -> bool:
 
 
 def _extract_user_type(claims: dict[str, Any]) -> str | None:
+    # Supabase: check user_metadata
+    user_metadata = claims.get("user_metadata")
+    if isinstance(user_metadata, dict):
+        candidate = str(user_metadata.get("user_type") or "").strip().lower()
+        if candidate in {"consumer", "merchant"}:
+            return candidate
+
+    # Supabase: check app_metadata
+    app_metadata = claims.get("app_metadata")
+    if isinstance(app_metadata, dict):
+        candidate = str(app_metadata.get("user_type") or "").strip().lower()
+        if candidate in {"consumer", "merchant"}:
+            return candidate
+
+    # Legacy Cognito: check custom:user_type
     cognito_custom = str(claims.get("custom:user_type") or "").strip().lower()
     if cognito_custom in {"consumer", "merchant"}:
         return cognito_custom
@@ -67,18 +82,6 @@ def _extract_user_type(claims: dict[str, Any]) -> str | None:
             return "merchant"
         if "consumer" in lowered_groups:
             return "consumer"
-
-    user_metadata = claims.get("user_metadata")
-    if isinstance(user_metadata, dict):
-        candidate = str(user_metadata.get("user_type") or "").strip().lower()
-        if candidate in {"consumer", "merchant"}:
-            return candidate
-
-    app_metadata = claims.get("app_metadata")
-    if isinstance(app_metadata, dict):
-        candidate = str(app_metadata.get("user_type") or "").strip().lower()
-        if candidate in {"consumer", "merchant"}:
-            return candidate
 
     return None
 
@@ -99,11 +102,19 @@ def _extract_email(claims: dict[str, Any]) -> str | None:
 
 
 def _extract_full_name(claims: dict[str, Any]) -> str | None:
+    # Supabase stores name in user_metadata
+    user_metadata = claims.get("user_metadata")
+    if isinstance(user_metadata, dict):
+        for field in ("full_name", "name"):
+            candidate = str(user_metadata.get(field) or "").strip()
+            if candidate:
+                return candidate[:255]
+
     direct_name = str(claims.get("name") or "").strip()
     if direct_name:
         return direct_name[:255]
 
-    for key in ("user_metadata", "app_metadata"):
+    for key in ("app_metadata",):
         section = claims.get(key)
         if not isinstance(section, dict):
             continue
@@ -112,6 +123,24 @@ def _extract_full_name(claims: dict[str, Any]) -> str | None:
             if candidate:
                 return candidate[:255]
     return None
+
+
+def _resolve_supabase_issuer() -> str:
+    """Build the Supabase JWT issuer URL from SUPABASE_URL or SUPABASE_JWT_ISSUER."""
+    settings = get_settings()
+
+    # Explicit issuer override
+    explicit_issuer = getattr(settings, "supabase_jwt_issuer", "").strip()
+    if explicit_issuer:
+        return explicit_issuer
+
+    # Build from Supabase URL
+    supabase_url = getattr(settings, "supabase_url", "").strip()
+    if supabase_url:
+        return f"{supabase_url.rstrip('/')}/auth/v1"
+
+    # Fallback: legacy Cognito issuer
+    return _resolve_cognito_issuer()
 
 
 def _resolve_cognito_issuer() -> str:
@@ -125,6 +154,51 @@ def _resolve_cognito_issuer() -> str:
     if not region or not user_pool_id:
         return ""
     return f"https://cognito-idp.{region}.amazonaws.com/{user_pool_id}"
+
+
+def _verify_supabase_jwt(token: str) -> dict[str, Any] | None:
+    """Verify a Supabase JWT using the JWT secret (HS256) or JWKS (RS256)."""
+    settings = get_settings()
+    if not token or jwt is None:
+        return None
+
+    # Method 1: Verify with Supabase JWT secret (HS256) — simpler, no JWKS
+    jwt_secret = getattr(settings, "supabase_jwt_secret", "").strip()
+    if jwt_secret:
+        try:
+            claims = jwt.decode(
+                token,
+                jwt_secret,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"require": ["exp", "sub"]},
+            )
+            if isinstance(claims, dict):
+                return claims
+        except Exception:
+            pass
+
+    # Method 2: Verify with JWKS endpoint (RS256)
+    supabase_url = getattr(settings, "supabase_url", "").strip()
+    if supabase_url:
+        jwks_url = f"{supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+        jwks_client = _jwks_client(jwks_url)
+        if jwks_client:
+            try:
+                signing_key = jwks_client.get_signing_key_from_jwt(token)
+                claims = jwt.decode(
+                    token,
+                    signing_key.key,
+                    algorithms=["RS256"],
+                    audience="authenticated",
+                    options={"require": ["exp", "sub"]},
+                )
+                if isinstance(claims, dict):
+                    return claims
+            except Exception:
+                pass
+
+    return None
 
 
 def _verify_cognito_jwt(token: str) -> dict[str, Any] | None:
@@ -215,27 +289,64 @@ def get_current_principal(
         return Principal(token=token, role=settings.auth_tokens[token])
 
     provider = settings.auth_provider.strip().lower()
-    if provider not in {"cognito", "aws_cognito"}:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unsupported auth provider")
-    claims = _verify_cognito_jwt(token)
 
-    if not claims:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    # Try Supabase JWT first
+    if provider in {"supabase", "supabase_auth"}:
+        claims = _verify_supabase_jwt(token)
+        if claims:
+            subject = str(claims.get("sub") or "").strip()
+            if not subject:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
-    subject = str(claims.get("sub") or "").strip()
-    if not subject:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+            user_type = _extract_user_type(claims) or "consumer"
+            role = "merchant" if user_type == "merchant" else "consumer"
+            return Principal(
+                token=token,
+                role=role,
+                subject=subject,
+                user_type=user_type,
+                email=_extract_email(claims),
+                full_name=_extract_full_name(claims),
+            )
 
-    user_type = _extract_user_type(claims) or "consumer"
-    role = "merchant" if user_type == "merchant" else "consumer"
-    return Principal(
-        token=token,
-        role=role,
-        subject=subject,
-        user_type=user_type,
-        email=_extract_email(claims),
-        full_name=_extract_full_name(claims),
-    )
+    # Try Cognito JWT
+    if provider in {"cognito", "aws_cognito"}:
+        claims = _verify_cognito_jwt(token)
+        if claims:
+            subject = str(claims.get("sub") or "").strip()
+            if not subject:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+            user_type = _extract_user_type(claims) or "consumer"
+            role = "merchant" if user_type == "merchant" else "consumer"
+            return Principal(
+                token=token,
+                role=role,
+                subject=subject,
+                user_type=user_type,
+                email=_extract_email(claims),
+                full_name=_extract_full_name(claims),
+            )
+
+    # Auto-detect: try Supabase first, then Cognito
+    if provider not in {"cognito", "aws_cognito", "supabase", "supabase_auth"}:
+        for verify_fn in (_verify_supabase_jwt, _verify_cognito_jwt):
+            claims = verify_fn(token)
+            if claims:
+                subject = str(claims.get("sub") or "").strip()
+                if subject:
+                    user_type = _extract_user_type(claims) or "consumer"
+                    role = "merchant" if user_type == "merchant" else "consumer"
+                    return Principal(
+                        token=token,
+                        role=role,
+                        subject=subject,
+                        user_type=user_type,
+                        email=_extract_email(claims),
+                        full_name=_extract_full_name(claims),
+                    )
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
 
 def require_roles(*allowed_roles: str) -> Callable:

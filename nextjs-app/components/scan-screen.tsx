@@ -202,6 +202,23 @@ export function ScanScreen() {
         headers.Authorization = `Bearer ${token}`
       }
 
+      let clientOcrText = ''
+      const isImageFile = file.type.startsWith('image/')
+      if (isImageFile) {
+        try {
+          const { createWorker } = await import('tesseract.js')
+          const worker = await createWorker('eng')
+          const ret = await worker.recognize(file)
+          clientOcrText = ret.data.text || ''
+          await worker.terminate()
+        } catch (err) {
+          console.warn('Client Tesseract OCR skipped:', err)
+        }
+      }
+      if (clientOcrText.trim()) {
+        formData.append('ocrText', clientOcrText.trim())
+      }
+
       const response = await fetch('/api/scan', {
         method: 'POST',
         body: formData,

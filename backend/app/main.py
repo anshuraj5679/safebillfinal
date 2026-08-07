@@ -116,6 +116,8 @@ def _should_start_local_async_extraction_worker() -> bool:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):  # pragma: no cover - background loop
     _ = app
+    from app.core.database import Base, engine
+    Base.metadata.create_all(bind=engine)
     stop: threading.Event | None = None
     async_stop: threading.Event | None = None
 

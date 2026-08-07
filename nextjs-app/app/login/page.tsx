@@ -19,7 +19,7 @@ export default function LoginPage() {
 
   const handleLogin = async () => {
     if (!identifier.trim() || !password.trim()) {
-      setError('Please enter your login ID and password.')
+      setError('Please enter your email/phone and password.')
       return
     }
 
@@ -61,7 +61,7 @@ export default function LoginPage() {
               </div>
               <h2 className="text-2xl font-bold">Welcome back</h2>
               <p className="text-sm text-base-content/60 mt-1">
-                Sign in with your SafeBill ID, email, or phone and password
+                Sign in with your email or phone and password
               </p>
             </div>
 
@@ -96,16 +96,12 @@ export default function LoginPage() {
               <div className="form-control">
                 <label className="label">
                   <span className="label-text font-medium text-base-content/80">
-                    {userType === 'consumer' ? 'Consumer ID, email, or phone' : 'Merchant ID, email, or phone'}
+                    {userType === 'consumer' ? 'Email or phone' : 'Email or phone'}
                   </span>
                 </label>
                 <input
                   type="text"
-                  placeholder={
-                    userType === 'consumer'
-                      ? 'e.g. CON-7C93F1A2, name@email.com, or +91XXXXXXXXXX'
-                      : 'e.g. MER-4B8D1C7E, name@email.com, or +91XXXXXXXXXX'
-                  }
+                  placeholder="name@email.com or +91XXXXXXXXXX"
                   value={identifier}
                   onChange={(event) => setIdentifier(event.target.value)}
                   className="input input-bordered w-full focus:input-primary bg-base-50"
@@ -127,13 +123,7 @@ export default function LoginPage() {
                 />
               </div>
 
-              <div className="flex items-center justify-between gap-3 text-sm">
-                <button
-                  onClick={() => router.push(`/auth/recover-id?userType=${userType}`)}
-                  className="link link-primary font-medium"
-                >
-                  {userType === 'merchant' ? 'Forgot Merchant ID?' : 'Forgot Consumer ID?'}
-                </button>
+              <div className="flex items-center justify-end text-sm">
                 <button
                   onClick={() => router.push(`/auth/forgot-password?userType=${userType}`)}
                   className="link link-primary font-medium"
