@@ -157,44 +157,16 @@ def _resolve_cognito_issuer() -> str:
 
 
 def _verify_supabase_jwt(token: str) -> dict[str, Any] | None:
-    """Verify a Supabase JWT using the JWT secret (HS256) or JWKS (RS256)."""
+    """Verify a Supabase JWT using JWKS (ES256/RS256) or JWT secret (HS256)."""
     settings = get_settings()
     if not token or jwt is None:
         return None
 
-    # Method 1: Verify with Supabase JWT secret (HS256) — simpler, no JWKS
-    jwt_secret = getattr(settings, "supabase_jwt_secret", "").strip()
-    if jwt_secret:
-        import base64
-        import sys
-        try:
-            sys.stderr.write(f"[Auth] Unverified header: {jwt.get_unverified_header(token)}\n")
-            sys.stderr.write(f"[Auth] Unverified claims: {jwt.decode(token, options={'verify_signature': False})}\n")
-        except Exception as e:
-            sys.stderr.write(f"[Auth] Failed to parse unverified token info: {e}\n")
+    # Supported algorithms — modern Supabase projects use ES256 via JWKS
+    JWKS_ALGORITHMS = ["ES256", "ES384", "ES512", "RS256", "RS384", "RS512", "EdDSA"]
+    HMAC_ALGORITHMS = ["HS256", "HS384", "HS512"]
 
-        keys_to_try = [jwt_secret, jwt_secret.encode()]
-        try:
-            padded = jwt_secret + "=" * (4 - len(jwt_secret) % 4)
-            keys_to_try.append(base64.b64decode(padded))
-        except Exception as e:
-            sys.stderr.write(f"[Auth] Base64 decode of secret failed: {e}\n")
-
-        for idx, key in enumerate(keys_to_try):
-            try:
-                claims = jwt.decode(
-                    token,
-                    key,
-                    algorithms=["HS256"],
-                    audience="authenticated",
-                    options={"require": ["exp", "sub"]},
-                )
-                if isinstance(claims, dict):
-                    return claims
-            except Exception as e:
-                sys.stderr.write(f"[Auth] HS256 decode key index {idx} failed: {e}\n")
-
-    # Method 2: Verify with JWKS endpoint (RS256)
+    # Method 1: Verify with JWKS endpoint (ES256/RS256) — modern Supabase default
     supabase_url = getattr(settings, "supabase_url", "").strip()
     if supabase_url:
         jwks_url = f"{supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
@@ -205,15 +177,39 @@ def _verify_supabase_jwt(token: str) -> dict[str, Any] | None:
                 claims = jwt.decode(
                     token,
                     signing_key.key,
-                    algorithms=["RS256"],
+                    algorithms=JWKS_ALGORITHMS,
                     audience="authenticated",
                     options={"require": ["exp", "sub"]},
                 )
                 if isinstance(claims, dict):
                     return claims
-            except Exception as e:
-                import sys
-                sys.stderr.write(f"[Auth] RS256 JWKS decode failed: {e}\n")
+            except Exception:
+                pass
+
+    # Method 2: Verify with Supabase JWT secret (HS256) — legacy / older projects
+    jwt_secret = getattr(settings, "supabase_jwt_secret", "").strip()
+    if jwt_secret:
+        import base64
+        keys_to_try = [jwt_secret, jwt_secret.encode()]
+        try:
+            padded = jwt_secret + "=" * (4 - len(jwt_secret) % 4)
+            keys_to_try.append(base64.b64decode(padded))
+        except Exception:
+            pass
+
+        for key in keys_to_try:
+            try:
+                claims = jwt.decode(
+                    token,
+                    key,
+                    algorithms=HMAC_ALGORITHMS,
+                    audience="authenticated",
+                    options={"require": ["exp", "sub"]},
+                )
+                if isinstance(claims, dict):
+                    return claims
+            except Exception:
+                pass
 
     return None
 
