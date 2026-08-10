@@ -250,22 +250,22 @@ def _extract_labeled_date(text: str, labels: list[str]) -> date | None:
 
 def _extract_bill_id(text: str, filename: str) -> str:
     patterns: list[tuple[int, str]] = [
-        (72, r"(?im)\btax\s*invoice\s*number\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/]{4,})"),
-        (62, r"(?im)\b(?:apple\s*)?document\s*number\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/]{4,})"),
-        (40, r"(?im)\b(?:invoice\s*\/\s*bill|bill\s*\/\s*invoice)\s*(?:no|number|#|id)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/]{2,})"),
-        (40, r"(?im)\binvoice\s*(?:no\.?|number|#|id)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/]{2,})"),
-        (35, r"(?im)\binv\s*(?:no\.?|number|#)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/]{2,})"),
+        (80, r"(?im)\btax\s*invoice\s*(?:no\.?|number|#|id)?\s*[:\-#\s]*#?\s*([A-Z0-9][A-Z0-9\-\/]{3,})"),
+        (75, r"(?im)\binvoice\s*(?:no\.?|number|#|id)\s*[:\-#\s]*#?\s*([A-Z0-9][A-Z0-9\-\/]{3,})"),
+        (62, r"(?im)\b(?:apple\s*)?document\s*number\s*[:\-#\s]*#?\s*([A-Z0-9][A-Z0-9\-\/]{4,})"),
+        (40, r"(?im)\b(?:invoice\s*\/\s*bill|bill\s*\/\s*invoice)\s*(?:no|number|#|id)\s*[:\-#\s]*#?\s*([A-Z0-9][A-Z0-9\-\/]{2,})"),
+        (35, r"(?im)\binv\s*(?:no\.?|number|#)\s*[:\-#\s]*#?\s*([A-Z0-9][A-Z0-9\-\/]{2,})"),
         (30, r"(?im)\b(INV[\-\/]?[A-Z0-9]{3,})\b"),
-        (10, r"(?im)\b(?:bill|receipt)\s*(?:no|number|#|id)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/]{2,})"),
-        (5, r"(?im)\border\s*(?:no|number|#)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/]{5,})"),
+        (10, r"(?im)\b(?:bill|receipt)\s*(?:no|number|#|id)\s*[:\-#\s]*#?\s*([A-Z0-9][A-Z0-9\-\/]{2,})"),
+        (5, r"(?im)\border\s*(?:no|number|#)\s*[:\-#\s]*#?\s*([A-Z0-9][A-Z0-9\-\/]{5,})"),
     ]
     candidates: list[tuple[int, str]] = []
     for priority, pattern in patterns:
         for match in re.finditer(pattern, text):
-            value = _clean_line(match.group(1)).strip(".,;:")
+            value = _clean_line(match.group(1)).strip(".,;:# ")
             if not value:
                 continue
-            if value.lower() in {"document", "invoice", "bill", "receipt", "original", "recipient"}:
+            if value.lower() in {"document", "invoice", "bill", "receipt", "original", "recipient", "number"}:
                 continue
             # Skip purchase-order references masquerading as invoice number.
             full_match = _clean_line(match.group(0)).lower()
@@ -280,7 +280,7 @@ def _extract_bill_id(text: str, filename: str) -> str:
             if value.isdigit() and len(value) >= 15 and not explicit_invoice_label:
                 continue
             score = priority
-            if value.upper().startswith("INV"):
+            if value.upper().startswith("INV") or value.upper().startswith("LIA"):
                 score += 10
             if any(ch.isalpha() for ch in value):
                 score += 3
@@ -288,7 +288,17 @@ def _extract_bill_id(text: str, filename: str) -> str:
     if candidates:
         candidates.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
         return candidates[0][1]
-    return os.path.splitext(filename)[0][:128]
+    return ""
+
+
+def _clean_vendor_name(raw: str) -> str:
+    text = _clean_line(raw)
+    if not text:
+        return ""
+    # Strip address fragments, trailing commas, or pincode/state notes (e.g. ", 5 ar", ", Patna , BIHAR")
+    text = re.sub(r"\s*,\s*\d+\s*[a-zA-Z]{1,3}\s*$", "", text)
+    text = re.sub(r"\s*,\s*(?:PATNA|BIHAR|INDIA|IN-BR|\d{6}).*$", "", text, flags=re.IGNORECASE)
+    return text.strip(" ,:-")
 
 
 def _extract_vendor(text: str, lines: list[str]) -> str:
@@ -297,7 +307,7 @@ def _extract_vendor(text: str, lines: list[str]) -> str:
         text,
     )
     if multiline_match:
-        multiline_value = _clean_line(multiline_match.group(1))
+        multiline_value = _clean_vendor_name(multiline_match.group(1))
         if multiline_value and not re.fullmatch(r"[\W_]+", multiline_value):
             return multiline_value[:255]
 
@@ -317,7 +327,9 @@ def _extract_vendor(text: str, lines: list[str]) -> str:
         ],
     )
     if labeled:
-        return labeled[:255]
+        cleaned_labeled = _clean_vendor_name(labeled)
+        if cleaned_labeled:
+            return cleaned_labeled[:255]
 
     ignored_tokens = (
         "invoice",

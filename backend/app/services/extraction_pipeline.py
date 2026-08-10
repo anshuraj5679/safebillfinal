@@ -409,9 +409,30 @@ class StrictInvoiceExtraction(BaseModel):
     category: str | None = None
     line_items: list[StrictLineItem] = Field(default_factory=list)
 
+    @field_validator("bill_id", mode="before")
+    @classmethod
+    def _normalize_bill_id(cls, value: object) -> str | None:
+        text = _normalize_text(value)
+        if not text:
+            return None
+        lowered = text.lower()
+        if any(bad in lowered for bad in ("whatsapp image", "screenshot", "screen shot", "img_", "dsc_", "uploaded document", "image_ocr")):
+            return None
+        return text[:128]
+
+    @field_validator("vendor", mode="before")
+    @classmethod
+    def _normalize_vendor(cls, value: object) -> str | None:
+        text = _normalize_text(value)
+        if not text:
+            return None
+        # Clean trailing commas or address leakage like ", 5 ar" or ", Patna"
+        text = re.sub(r"\s*,\s*\d+\s*[a-zA-Z]{1,3}\s*$", "", text)
+        text = re.sub(r"\s*,\s*(?:PATNA|BIHAR|INDIA|IN-BR|\d{6}).*$", "", text, flags=re.IGNORECASE)
+        text = text.strip(" ,:-")
+        return text[:255] if text else None
+
     @field_validator(
-        "bill_id",
-        "vendor",
         "vendor_tax_id",
         "product_name",
         "brand",

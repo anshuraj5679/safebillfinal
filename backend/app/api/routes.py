@@ -1685,8 +1685,11 @@ def _should_apply_bill_id_hint(current_value: object, *, filename: str) -> bool:
     current = str(current_value or "").strip()
     if not current:
         return True
+    lowered = current.lower()
+    if any(bad in lowered for bad in ("whatsapp image", "screenshot", "screen shot", "img_", "dsc_", "uploaded document")):
+        return True
     stem = _filename_stem(filename)
-    if stem and current.lower() == stem.lower():
+    if stem and lowered == stem.lower():
         return True
     if current.upper().startswith(("IMAGE_OCR_", "IMAGE_OCR-", "INGEST_PDF-", "INGEST_IMAGE-")):
         return True
@@ -3031,7 +3034,11 @@ def _persist_structured_document(
         )
 
     fallback_bill = f"{source.upper()}-{int(time.time() * 1000)}"
-    resolved_bill_id = str(metadata.get("bill_id") or fallback_bill)[:128]
+    raw_bill = str(metadata.get("bill_id") or "").strip()
+    if not raw_bill or any(bad in raw_bill.lower() for bad in ("whatsapp image", "screenshot", "screen shot", "img_", "dsc_")):
+        resolved_bill_id = fallback_bill[:128]
+    else:
+        resolved_bill_id = raw_bill[:128]
     resolved_vendor = str(metadata.get("vendor") or "UNKNOWN_VENDOR")[:256]
     resolved_date = _coerce_date(metadata.get("date"))
     resolved_total = _coerce_float(metadata.get("total_amount"))

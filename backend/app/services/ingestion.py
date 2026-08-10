@@ -219,14 +219,11 @@ class IngestionService:
             total_amount=total_amount,
         )
 
-        resolved_bill_id = str(
-            self._coalesce(
-                parsed_metadata.get("bill_id"),
-                None,
-            )
-            or filename.rsplit(".", 1)[0]
-            or f"PDF-{int(time.time() * 1000)}"
-        )[:128]
+        raw_bill_id = str(parsed_metadata.get("bill_id") or "").strip()
+        if not raw_bill_id or any(bad in raw_bill_id.lower() for bad in ("whatsapp image", "screenshot", "img_", "dsc_")):
+            resolved_bill_id = f"DOC-{int(time.time() * 1000)}"
+        else:
+            resolved_bill_id = raw_bill_id[:128]
         requested_version = max(int(version or 1), 1)
         latest_version = db.execute(
             select(Document.version)
