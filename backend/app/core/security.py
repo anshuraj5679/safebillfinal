@@ -166,14 +166,15 @@ def _verify_supabase_jwt(token: str) -> dict[str, Any] | None:
     jwt_secret = getattr(settings, "supabase_jwt_secret", "").strip()
     if jwt_secret:
         import base64
+        import sys
         keys_to_try = [jwt_secret, jwt_secret.encode()]
         try:
             padded = jwt_secret + "=" * (4 - len(jwt_secret) % 4)
             keys_to_try.append(base64.b64decode(padded))
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write(f"[Auth] Base64 decode of secret failed: {e}\n")
 
-        for key in keys_to_try:
+        for idx, key in enumerate(keys_to_try):
             try:
                 claims = jwt.decode(
                     token,
@@ -184,8 +185,8 @@ def _verify_supabase_jwt(token: str) -> dict[str, Any] | None:
                 )
                 if isinstance(claims, dict):
                     return claims
-            except Exception:
-                pass
+            except Exception as e:
+                sys.stderr.write(f"[Auth] HS256 decode key index {idx} failed: {e}\n")
 
     # Method 2: Verify with JWKS endpoint (RS256)
     supabase_url = getattr(settings, "supabase_url", "").strip()
@@ -204,8 +205,9 @@ def _verify_supabase_jwt(token: str) -> dict[str, Any] | None:
                 )
                 if isinstance(claims, dict):
                     return claims
-            except Exception:
-                pass
+            except Exception as e:
+                import sys
+                sys.stderr.write(f"[Auth] RS256 JWKS decode failed: {e}\n")
 
     return None
 
