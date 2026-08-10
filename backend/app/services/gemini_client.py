@@ -233,20 +233,47 @@ def gemini_extract_image_metadata(image_bytes: bytes, filename: str) -> dict[str
     data_url = f"data:{mime_type};base64,{encoded_image}"
 
     system_instruction = (
-        "You are an invoice data extraction engine. "
-        "Return only JSON. Do not guess missing values. Use null for missing fields. "
-        "Dates must be ISO 8601 format (YYYY-MM-DD). "
-        "Extract these keys exactly: "
-        "bill_id, vendor, date, total_amount, vendor_tax_id, taxable_amount, gst_amount, gst_rate, "
-        "cgst_amount, sgst_amount, igst_amount, product_name, brand, serial_number, warranty_months, "
-        "warranty_start, warranty_end, category, line_items, full_text. "
-        "For full_text, extract all visible text from the document. "
-        "For line_items, return an array of objects with keys: name, quantity, unit_price, amount."
+        "You are an expert Indian invoice and bill data extraction engine. "
+        "Your task is to extract structured data from scanned invoices, receipts, bills, and warranty cards. "
+        "Return ONLY valid JSON. Do NOT guess or hallucinate values — use null for genuinely missing fields.\n\n"
+        "CRITICAL EXTRACTION RULES:\n"
+        "1. bill_id: This is the INVOICE NUMBER / BILL NUMBER / RECEIPT NUMBER / ORDER ID. "
+        "Look for labels like 'Invoice No', 'Invoice Number', 'Invoice #', 'Bill No', 'Receipt No', "
+        "'Order ID', 'Order No', 'Tax Invoice No', 'Ref No', 'Document No', 'Voucher No', 'Transaction ID'. "
+        "The value is typically an alphanumeric code (e.g., 'LIAEJYP270000717', 'INV-2025-001234', 'OD338159471494527100'). "
+        "Do NOT confuse bill_id with GSTIN, PAN, HSN code, phone number, or pincode.\n"
+        "2. vendor: The SELLER / MERCHANT / STORE name (e.g., 'Reliance Digital', 'Amazon', 'Flipkart', 'Croma'). "
+        "Look for 'Sold By', 'Seller', 'From', or the company name at the top of the invoice.\n"
+        "3. date: The INVOICE DATE / BILL DATE / ORDER DATE in ISO 8601 format (YYYY-MM-DD). "
+        "Look for 'Invoice Date', 'Bill Date', 'Date', 'Order Date'. Convert any format to YYYY-MM-DD.\n"
+        "4. total_amount: The GRAND TOTAL / TOTAL AMOUNT / INVOICE VALUE. This is the final payable amount including taxes. "
+        "Look for 'Grand Total', 'Total', 'Net Amount', 'Invoice Value', 'Amount Payable'.\n"
+        "5. vendor_tax_id: The seller's GSTIN (15-character alphanumeric like '29AABCR1718E1Z1'). "
+        "Look for 'GSTIN', 'GST No', 'Tax ID'. Do NOT use the buyer's GSTIN.\n"
+        "6. taxable_amount: The pre-tax subtotal amount before GST.\n"
+        "7. gst_amount: Total GST amount (CGST + SGST or IGST).\n"
+        "8. gst_rate: The GST percentage (e.g., 18, 12, 5, 28).\n"
+        "9. cgst_amount, sgst_amount, igst_amount: Individual GST component amounts.\n"
+        "10. product_name: The PRIMARY product name from the invoice (most expensive or first item). "
+        "Include model number if visible (e.g., 'realme Buds T310 with 12.4mm Driver').\n"
+        "11. brand: The product brand (e.g., 'Realme', 'Samsung', 'Apple', 'LG').\n"
+        "12. serial_number: IMEI, Serial No, or S/N of the product.\n"
+        "13. warranty_months: Warranty duration in months (e.g., 12 for 1 year).\n"
+        "14. warranty_start, warranty_end: Warranty period dates in YYYY-MM-DD.\n"
+        "15. category: Product category (e.g., 'Electronics', 'Appliances', 'Mobile', 'Audio').\n"
+        "16. line_items: Array of objects with keys: name, quantity, unit_price, amount.\n"
+        "17. full_text: Extract ALL visible text from the document verbatim, preserving layout.\n\n"
+        "Return these exact JSON keys: bill_id, vendor, date, total_amount, vendor_tax_id, "
+        "taxable_amount, gst_amount, gst_rate, cgst_amount, sgst_amount, igst_amount, "
+        "product_name, brand, serial_number, warranty_months, warranty_start, warranty_end, "
+        "category, line_items, full_text."
     )
 
     user_prompt = (
-        "Extract all invoice fields and full readable text from this document. "
-        "Keep original invoice number formatting and correct decimal amounts."
+        "Extract all invoice/bill fields and the complete readable text from this document image. "
+        "Pay special attention to: (1) the Invoice Number / Bill Number — it is usually near the top, "
+        "(2) the Grand Total amount, (3) the seller GSTIN, (4) product details with model numbers. "
+        "Keep original formatting for invoice numbers and serial numbers. Use correct decimal amounts."
     )
 
     headers = {
@@ -269,7 +296,7 @@ def gemini_extract_image_metadata(image_bytes: bytes, filename: str) -> dict[str
             }
         ],
         "temperature": 0.1,
-        "max_tokens": 2000,
+        "max_tokens": 4000,
         "response_format": {"type": "json_object"}
     }
 
