@@ -167,6 +167,12 @@ def _verify_supabase_jwt(token: str) -> dict[str, Any] | None:
     if jwt_secret:
         import base64
         import sys
+        try:
+            sys.stderr.write(f"[Auth] Unverified header: {jwt.get_unverified_header(token)}\n")
+            sys.stderr.write(f"[Auth] Unverified claims: {jwt.decode(token, options={'verify_signature': False})}\n")
+        except Exception as e:
+            sys.stderr.write(f"[Auth] Failed to parse unverified token info: {e}\n")
+
         keys_to_try = [jwt_secret, jwt_secret.encode()]
         try:
             padded = jwt_secret + "=" * (4 - len(jwt_secret) % 4)
