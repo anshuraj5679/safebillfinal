@@ -165,18 +165,27 @@ def _verify_supabase_jwt(token: str) -> dict[str, Any] | None:
     # Method 1: Verify with Supabase JWT secret (HS256) — simpler, no JWKS
     jwt_secret = getattr(settings, "supabase_jwt_secret", "").strip()
     if jwt_secret:
+        import base64
+        keys_to_try = [jwt_secret, jwt_secret.encode()]
         try:
-            claims = jwt.decode(
-                token,
-                jwt_secret,
-                algorithms=["HS256"],
-                audience="authenticated",
-                options={"require": ["exp", "sub"]},
-            )
-            if isinstance(claims, dict):
-                return claims
+            padded = jwt_secret + "=" * (4 - len(jwt_secret) % 4)
+            keys_to_try.append(base64.b64decode(padded))
         except Exception:
             pass
+
+        for key in keys_to_try:
+            try:
+                claims = jwt.decode(
+                    token,
+                    key,
+                    algorithms=["HS256"],
+                    audience="authenticated",
+                    options={"require": ["exp", "sub"]},
+                )
+                if isinstance(claims, dict):
+                    return claims
+            except Exception:
+                pass
 
     # Method 2: Verify with JWKS endpoint (RS256)
     supabase_url = getattr(settings, "supabase_url", "").strip()
