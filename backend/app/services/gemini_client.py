@@ -39,12 +39,12 @@ def _get_api_key() -> str:
 
 def _get_model(model: str | None) -> str:
     settings = get_settings()
-    resolved = model or settings.gemini_model or "qwen/qwen2.5-vl-72b-instruct"
-    # Map legacy model names to OpenRouter
-    if resolved in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "qwen/qwen2.5-vl-72b-instruct:free"):
-        resolved = "qwen/qwen2.5-vl-72b-instruct"
+    resolved = model or settings.gemini_model or "openrouter/free"
+    # Map legacy / paid model names to OpenRouter free router when using free key
+    if resolved in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "qwen/qwen2.5-vl-72b-instruct", "qwen/qwen2.5-vl-72b-instruct:free"):
+        resolved = "openrouter/free"
     if resolved.endswith(":free") and "qwen" in resolved:
-        resolved = resolved.replace(":free", "")
+        resolved = "openrouter/free"
     return resolved
 
 
@@ -306,10 +306,10 @@ def gemini_extract_image_metadata(image_bytes: bytes, filename: str) -> dict[str
             del body_fallback["response_format"]
             response = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body_fallback, timeout=90)
         
-        if response.status_code in (402, 403, 429) and resolved_model != "nvidia/nemotron-nano-12b-v2-vl:free":
-            logger.warning("Paid image extraction model failed with %s. Falling back to nvidia/nemotron-nano-12b-v2-vl:free.", response.status_code)
+        if response.status_code in (400, 402, 403, 404, 429) and resolved_model != "openrouter/free":
+            logger.warning("Paid image extraction model failed with %s. Falling back to openrouter/free.", response.status_code)
             body_free = body.copy()
-            body_free["model"] = "nvidia/nemotron-nano-12b-v2-vl:free"
+            body_free["model"] = "openrouter/free"
             if "response_format" in body_free:
                 del body_free["response_format"]
             response = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body_free, timeout=90)
