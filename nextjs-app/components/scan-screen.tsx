@@ -236,7 +236,16 @@ export function ScanScreen() {
       }
 
       if (!response.ok) {
-        const message = toReadableError(data?.error || data)
+        let message = toReadableError(data?.error || data)
+        if (message === 'Scan failed. Please try again.') {
+          if (response.status === 504 || response.status === 502) {
+            message = 'Server timed out or is warming up. Please wait 10 seconds and click Start Extraction again.'
+          } else if (response.status === 401) {
+            message = 'Session expired or unauthorized. Please log out and sign in again.'
+          } else {
+            message = `Scan request failed with status ${response.status}. Please try again.`
+          }
+        }
         if (message.includes('Unable to extract readable text from this image')) {
           setShowManualFallback(true)
         }
