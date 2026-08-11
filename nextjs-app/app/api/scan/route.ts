@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { BackendApiError, backendApiFetch, resolveRequestAuthToken, withQuery } from '@/lib/backend-api'
 
 export const runtime = 'nodejs'
+export const maxDuration = 60
 const INGEST_TIMEOUT_MS = 120000
 const DOCUMENT_FETCH_TIMEOUT_MS = 60000
 const OCR_TEXT_MIN_LENGTH = 1
@@ -167,7 +168,12 @@ function normalizeAmount(value: string | number | null | undefined): string {
 }
 
 async function extractWithVisionService(file: File): Promise<VisionOcrResponse | null> {
-  const base = String(process.env.VISION_OCR_BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '')
+  const rawBase = process.env.VISION_OCR_BASE_URL
+  if (!rawBase) return null
+  const base = String(rawBase).replace(/\/$/, '')
+  if (!base || (process.env.NODE_ENV === 'production' && (base.includes('127.0.0.1') || base.includes('localhost')))) {
+    return null
+  }
   const target = `${base}/api/ocr`
   const fd = new FormData()
   fd.append('file', file, file.name)

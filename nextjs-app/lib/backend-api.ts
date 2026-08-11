@@ -1,7 +1,7 @@
 import type { NextRequest } from 'next/server'
 
 const DEFAULT_BACKEND_ORIGIN = 'http://localhost:8000'
-const DEFAULT_TIMEOUT_MS = 45000
+const DEFAULT_TIMEOUT_MS = 90000
 
 function normalizeBaseUrl(raw: string): string {
   const trimmed = raw.replace(/\/+$/, '')

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { BackendApiError, backendApiFetch, resolveRequestAuthToken, withQuery } from '@/lib/backend-api'
 
 export const runtime = 'nodejs'
+export const maxDuration = 60
 const INGEST_TIMEOUT_MS = 120000
 const DOCUMENT_FETCH_TIMEOUT_MS = 60000
 const DEFAULT_OCR_MODE = 'hybrid'
